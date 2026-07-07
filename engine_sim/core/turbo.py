@@ -5,11 +5,11 @@ chases a target (set by RPM/exhaust energy and ECU wastegate duty) with a
 first-order lag, which is what produces turbo lag and the "hits boost" feel.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from math import exp
 
-from .specs import TurboSpec
-from .units import BAR_TO_PA
+from ..specs import TurboSpec
+from ..units import BAR_TO_PA
 
 
 @dataclass

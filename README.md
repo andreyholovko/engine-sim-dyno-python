@@ -8,22 +8,38 @@ arrive in the drag-strip phase.
 ## Layout
 
 ```
-engine_sim/          Pure Python simulation core (zero Godot imports)
-  specs.py           EngineSpec / TurboSpec / CamSpec -- data-driven engine params
-  engine.py          Engine (abstract) + ParametricEngine (mean-value engine model)
-  turbo.py           Turbo: spool lag + wastegate-controlled boost target
-  ecu.py             ECU: fuel control (AFR), wastegate duty, rev limiter, MAP
-  dyno.py            DynoBrake (load model) + SimulationLoop (tick loop)
-  presets.py         EA888 Gen3 (IS20) and Gen3B (IS38) real-world presets
-tests/               pytest suite, incl. validation against published EA888 figures
-godot/                Godot 4.7+ project
-  addons/py4godot/    Embedded-Python GDExtension (macOS arm64 build only, ~124MB)
+engine_sim/                    Pure Python simulation core (zero Godot imports)
+  specs.py                     EngineSpec / TurboSpec / CamSpec -- data-driven params,
+                                shared by core/ and presets/, kept at top level since
+                                both depend on it
+  core/                        The simulation itself
+    engine.py                  Engine (abstract) + ParametricEngine (mean-value engine model)
+    turbo.py                   Turbo: spool lag + wastegate-controlled boost target
+    ecu.py                     ECU: fuel control (AFR), wastegate duty, rev limiter, MAP
+    dyno.py                    DynoBrake (load model) + SimulationLoop (tick loop)
+  presets/                     Real-world engine/turbo data, one file each
+    engines/
+      ea888_gen3_is20.py       EA888_GEN3_IS20 -- the validation target, actually wired in
+      ea888_gen3b_is38.py      EA888_GEN3B_IS38 -- Miller-cycle example, decorative only
+    turbos/
+      is20.py                 TURBO_IS20 -- actually wired in; edit max_boost_bar here
+      is38.py                 TURBO_IS38 -- decorative only
+tests/                         pytest suite, incl. validation against published EA888 figures
+godot/                         Godot 4.7+ project
+  addons/py4godot/             Embedded-Python GDExtension (gitignored -- see setup below)
   scripts/
-    dyno_controller.py  py4godot Node: owns a SimulationLoop, ticks it every frame
-    dyno_ui.gd          Wires sliders/buttons/labels to the controller
-    dyno_graph.gd        Live torque/power-vs-rpm plot
-  scenes/Dyno.tscn      The dyno interface
+    dyno_controller.py         py4godot Node: owns a SimulationLoop, ticks it every frame
+    dyno_ui.gd                 Wires sliders/buttons/labels to the controller
+    dyno_graph.gd              Live torque/power-vs-rpm plot
+  scenes/Dyno.tscn             The dyno interface
 ```
+
+Everything under `engine_sim/` is still reached the same way from outside the
+package (`from engine_sim import ECU, ...`, `from engine_sim.presets import
+EA888_GEN3_IS20, TURBO_IS20`) -- `core/` and `presets/` are an internal
+reorganization, not a public API change. Adding a new engine or turbo is just
+a new file under `presets/engines/` or `presets/turbos/`, plus one line in
+that folder's `__init__.py`.
 
 ## Why it's built this way
 

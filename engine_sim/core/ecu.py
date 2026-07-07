@@ -12,8 +12,8 @@ overridden live -- exactly the "adjustable in real time" knobs the dyno needs.
 from dataclasses import dataclass
 from typing import Optional
 
-from .specs import EngineSpec, TurboSpec
-from .units import P_ATM
+from ..specs import EngineSpec, TurboSpec
+from ..units import P_ATM
 
 
 @dataclass

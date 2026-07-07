@@ -16,8 +16,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from math import exp
 
-from .specs import EngineSpec
-from .units import R_AIR, LHV_GASOLINE
+from ..specs import EngineSpec
+from ..units import R_AIR, LHV_GASOLINE
 
 
 @dataclass

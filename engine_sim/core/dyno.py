@@ -28,7 +28,7 @@ from typing import Literal, Optional
 from .ecu import ECU
 from .engine import Engine, EngineReading
 from .turbo import Turbo
-from .units import rpm_to_rad_s, rad_s_to_rpm, power_watts
+from ..units import rpm_to_rad_s, rad_s_to_rpm, power_watts
 
 DynoMode = Literal["ramp_rpm", "free_accel", "hold_rpm"]
 
