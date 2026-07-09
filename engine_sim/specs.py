@@ -81,6 +81,14 @@ class EngineSpec:
 
     crank_inertia_kgm2: float = 0.18
 
+    # Minimum pump-octane (AKI/(R+M)/2, US-style rating) the factory tune
+    # assumes it can run without retarding timing under load -- approximate,
+    # not an exact published spec, since manufacturers rarely publish a bare
+    # knock-onset number. Running below this on a live octane override costs
+    # thermal efficiency under load (ECU pulling timing to protect against
+    # knock); running at or above it costs nothing, same as today.
+    knock_octane_requirement: float = 91.0
+
     @property
     def displacement_m3(self) -> float:
         return self.displacement_l / 1000.0
@@ -104,3 +112,27 @@ class TurboSpec:
     spool_midpoint_rpm: float
     spool_width_rpm: float = 700.0
     spool_time_constant_s: float = 0.35
+
+    # Charge-air heating: a real turbo (even intercooled) delivers boosted
+    # air hotter than ambient, and that heat builds up over a sustained pull
+    # -- a boosted engine's torque tapers slightly the longer it's held at
+    # boost, unlike this sim's previous flat-ambient-forever intake temp.
+    # Rise is *post-intercooler* (whatever cooling exists is already priced
+    # into this one number, deliberately, rather than modeling compressor
+    # discharge temp and intercooler effectiveness as two separate invented
+    # constants -- see Turbo.tick()).
+    charge_temp_rise_k_per_bar: float = 30.0
+    # Thermal lag to reach steady charge temp -- much slower than the boost
+    # pressure signal itself (spool_time_constant_s), which is why back-to-
+    # back pulls run hotter than a single pull from cold even though boost
+    # itself reads the same on the gauge each time.
+    heat_soak_time_constant_s: float = 10.0
+
+    # How many independent exhaust paths feed the turbine (1 = single-scroll
+    # log manifold combining every cylinder's pulses into one feed; 2 =
+    # twin-scroll, splitting the firing order into two alternating groups).
+    # Combined with the engine's actual firing order (not just cylinder
+    # count) in Turbo, this is what makes spool response engine-specific
+    # instead of a purely hand-tuned constant -- see
+    # Turbo._compute_pulse_quality().
+    exhaust_scroll_groups: int = 1

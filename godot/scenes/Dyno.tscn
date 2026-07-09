@@ -82,19 +82,22 @@ layout_mode = 2
 
 [node name="PowerPullButton" type="Button" parent="Layout/PowerPullRow"]
 layout_mode = 2
-text = "Start Power Pull (WOT sweep)"
+text = "Start Power Pull"
 
-[node name="RampRateLabel" type="Label" parent="Layout/PowerPullRow"]
+[node name="ThrottleRow" type="HBoxContainer" parent="Layout"]
 layout_mode = 2
-text = "Ramp: 400 rpm/s"
 
-[node name="RampRateSlider" type="HSlider" parent="Layout/PowerPullRow"]
-custom_minimum_size = Vector2(200, 0)
+[node name="ThrottleLabel" type="Label" parent="Layout/ThrottleRow"]
 layout_mode = 2
-min_value = 100.0
-max_value = 800.0
-step = 10.0
-value = 400.0
+custom_minimum_size = Vector2(160, 0)
+text = "Throttle: 0%"
+
+[node name="ThrottleSlider" type="VSlider" parent="Layout/ThrottleRow"]
+custom_minimum_size = Vector2(0, 150)
+layout_mode = 2
+max_value = 100.0
+step = 1.0
+value = 0.0
 
 [node name="Readouts" type="GridContainer" parent="Layout"]
 layout_mode = 2
@@ -172,6 +175,14 @@ text = "Eff. Compression"
 layout_mode = 2
 text = "0"
 
+[node name="IatLabel" type="Label" parent="Layout/Readouts"]
+layout_mode = 2
+text = "Intake Air Temp (C)"
+
+[node name="IatValue" type="Label" parent="Layout/Readouts"]
+layout_mode = 2
+text = "0"
+
 [node name="RevLimiterLabel" type="Label" parent="Layout/Readouts"]
 layout_mode = 2
 text = "Rev Limiter"
@@ -190,5 +201,5 @@ script = ExtResource("3")
 [connection signal="value_changed" from="Layout/BoostRow/BoostSlider" to="." method="_on_boost_target_changed"]
 [connection signal="toggled" from="Layout/AfrRow/AfrCheckBox" to="." method="_on_afr_override_toggled"]
 [connection signal="value_changed" from="Layout/AfrRow/AfrSlider" to="." method="_on_afr_slider_changed"]
-[connection signal="value_changed" from="Layout/PowerPullRow/RampRateSlider" to="." method="_on_ramp_rate_changed"]
 [connection signal="pressed" from="Layout/PowerPullRow/PowerPullButton" to="." method="_on_power_pull_pressed"]
+[connection signal="value_changed" from="Layout/ThrottleRow/ThrottleSlider" to="." method="_on_throttle_changed"]

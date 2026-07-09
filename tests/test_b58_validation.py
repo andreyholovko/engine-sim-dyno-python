@@ -7,23 +7,15 @@ tests/test_ea888_validation.py -- see that file for why tolerances are sized
 the way they are. This is the second independently-validated preset, so
 these tests also double as a check that ENGINE_CHOICES' selection mechanism
 actually produces a working, correctly-tuned engine, not just the default.
+
+Uses the `b58_loop` fixture (tests/conftest.py).
 """
 
-from engine_sim import ECU, DynoBrake, ParametricEngine, SimulationLoop, Turbo
-from engine_sim.presets import B58_340I, TURBO_B58
+from engine_sim.presets import TURBO_B58
 
 
-def _build_loop() -> SimulationLoop:
-    engine = ParametricEngine(B58_340I)
-    turbo = Turbo(TURBO_B58)
-    ecu = ECU(engine, turbo)
-    brake = DynoBrake()
-    return SimulationLoop(ecu, brake)
-
-
-def test_peak_torque_matches_published_figure():
-    loop = _build_loop()
-    readings = loop.run_power_pull()
+def test_peak_torque_matches_published_figure(b58_loop):
+    readings = b58_loop.run_power_pull()
     peak = max(readings, key=lambda r: r.engine.net_torque_nm)
     # Published torque is 447Nm (330lb-ft); +-15% for the same MVEM
     # approximation reasons as the EA888 tolerance.
@@ -32,34 +24,30 @@ def test_peak_torque_matches_published_figure():
     assert 1100.0 <= peak.rpm <= 5300.0, peak.rpm
 
 
-def test_torque_plateau_is_flat_across_published_band():
-    loop = _build_loop()
-    readings = loop.run_power_pull()
+def test_torque_plateau_is_flat_across_published_band(b58_loop):
+    readings = b58_loop.run_power_pull()
     in_band = [r for r in readings if 1400.0 <= r.rpm <= 5000.0]
     assert len(in_band) > 5
     torques = [r.engine.net_torque_nm for r in in_band]
     assert (max(torques) - min(torques)) / max(torques) < 0.20
 
 
-def test_peak_power_matches_published_figure():
-    loop = _build_loop()
-    readings = loop.run_power_pull()
+def test_peak_power_matches_published_figure(b58_loop):
+    readings = b58_loop.run_power_pull()
     peak = max(readings, key=lambda r: r.power_w)
     # Published peak is 238.7kW; +-15% tolerance for the same reason as torque.
     assert 203.0 <= peak.power_kw <= 274.0, peak.power_kw
     assert 4700.0 <= peak.rpm <= 6800.0, peak.rpm
 
 
-def test_twin_scroll_turbo_spools_quickly():
+def test_twin_scroll_turbo_spools_quickly(b58_loop):
     """The B58's flat torque plateau starting at just 1380rpm implies it's
     already near full boost by then -- much quicker than the EA888's IS20."""
-    loop = _build_loop()
-    readings = loop.run_power_pull()
+    readings = b58_loop.run_power_pull()
     at_1500 = min(readings, key=lambda r: abs(r.rpm - 1500.0))
     assert at_1500.boost_bar >= 0.9 * TURBO_B58.max_boost_bar
 
 
-def test_power_pull_terminates_at_redline():
-    loop = _build_loop()
-    readings = loop.run_power_pull()
-    assert readings[-1].rpm >= loop.ecu.rev_limiter_threshold_rpm
+def test_power_pull_terminates_at_redline(b58_loop):
+    readings = b58_loop.run_power_pull()
+    assert readings[-1].rpm >= b58_loop.ecu.rev_limiter_threshold_rpm

@@ -1,10 +1,9 @@
 """py4godot Node wrapping DynoSession -- the single interface every dyno
-frontend (this Godot UI, the CLI, and any future consumer, e.g. a 3D
-drag-strip view) drives. All the simulation math lives in engine_sim (pure
-Python, Godot-agnostic, tested with plain pytest); this file's only job is
-moving numbers between DynoSession and Godot's exported node properties. If
-py4godot's embedding ever becomes a dead end, only this adapter needs
-replacing, not the simulation itself.
+frontend (this Godot UI and the CLI) drives. All the simulation math lives
+in engine_sim (pure Python, Godot-agnostic, tested with plain pytest); this
+file's only job is moving numbers between DynoSession and Godot's exported
+node properties. If py4godot's embedding ever becomes a dead end, only this
+adapter needs replacing, not the simulation itself.
 """
 
 import sys
@@ -33,16 +32,22 @@ from engine_sim import DynoSession  # noqa: E402
 class dyno_controller(Node):
 	"""Every attribute below is exactly what a real ECU could report on its
 	data bus -- this drives the dyno's live readout, not a display-only mock.
-	Inputs (set from the UI): afr_override, boost_target_percent, and the
-	start_power_pull()/stop_power_pull() methods. Outputs (read by the UI
-	every frame): everything else, including power_pull_active, which mirrors
-	the session's own state -- it is not itself a control input.
+	Inputs (set from the UI): afr_override, boost_target_percent,
+	octane_override, throttle_percent, and the start_power_pull()/
+	stop_power_pull() methods. Outputs (read by the UI every frame):
+	everything else, including power_pull_active, which mirrors the
+	session's own state -- it is not itself a control input.
 	"""
 
 	# --- inputs, driven by the UI scene ---
 	afr_override: float = -1.0  # -1 = let the ECU's own control law decide
 	boost_target_percent: float = 100.0  # wastegate authority, 0-100% of max boost
-	ramp_rate_rpm_s: float = 400.0
+	octane_override: float = -1.0  # -1 = use the engine's own knock_octane_requirement
+	# Live throttle, 0-100 -- driven by the UI's vertical throttle slider,
+	# read every physics tick. Replaces the old fixed-pace ramp_rate_rpm_s:
+	# the user's own slider position paces the sweep now, the way a real
+	# inertia dyno is driven by the operator's right foot.
+	throttle_percent: float = 0.0
 
 	# --- live readout, updated every physics tick ---
 	rpm: float = 0.0
@@ -54,6 +59,7 @@ class dyno_controller(Node):
 	fuel_mass_flow_g_s: float = 0.0
 	effective_compression_ratio: float = 0.0
 	volumetric_efficiency: float = 0.0
+	intake_air_temp_c: float = 0.0
 	rev_limiter_active: bool = False
 	power_pull_active: bool = False
 
@@ -130,9 +136,10 @@ class dyno_controller(Node):
 
 		self._session.set_afr_override(self.afr_override if self.afr_override >= 0.0 else None)
 		self._session.set_boost_target_percent(self.boost_target_percent)
+		self._session.set_octane_override(self.octane_override if self.octane_override >= 0.0 else None)
 
 		was_active = self._session.is_power_pull_active
-		snapshot = self._session.tick(delta, throttle_percent=0.0)
+		snapshot = self._session.tick(delta, throttle_percent=self.throttle_percent)
 
 		self.power_pull_active = snapshot.power_pull_active
 		if was_active and not snapshot.power_pull_active:
@@ -147,12 +154,13 @@ class dyno_controller(Node):
 		self.fuel_mass_flow_g_s = snapshot.fuel_mass_flow_g_s
 		self.effective_compression_ratio = snapshot.effective_compression_ratio
 		self.volumetric_efficiency = snapshot.volumetric_efficiency
+		self.intake_air_temp_c = snapshot.intake_air_temp_k - 273.15
 		self.rev_limiter_active = snapshot.rev_limiter_active
 
 	def start_power_pull(self) -> None:
 		if self._session is None:
 			return
-		self._session.start_power_pull(self.ramp_rate_rpm_s)
+		self._session.start_power_pull()
 
 	def stop_power_pull(self) -> None:
 		if self._session is not None:

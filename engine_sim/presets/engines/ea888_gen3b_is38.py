@@ -29,4 +29,8 @@ EA888_GEN3B_IS38 = EngineSpec(
     combustion_efficiency=0.98,
     realism_factor=0.82,
     crank_inertia_kgm2=0.18,
+    # Higher geometric compression than the base Gen3 -- approximate, not
+    # verified (see module docstring), but the Miller-cycle low-load ratio
+    # is exactly what buys headroom against needing even more than this.
+    knock_octane_requirement=93.0,
 )

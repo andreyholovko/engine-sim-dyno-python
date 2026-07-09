@@ -30,4 +30,7 @@ EA888_GEN3_IS20 = EngineSpec(
     # detonation margin -- not modeled explicitly, folded in here.
     realism_factor=0.52,
     crank_inertia_kgm2=0.18,
+    # VW/Audi calls for premium (95 RON / ~91 AKI) on this application --
+    # approximate, not a literal published knock-onset figure.
+    knock_octane_requirement=91.0,
 )

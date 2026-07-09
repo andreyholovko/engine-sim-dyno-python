@@ -23,7 +23,7 @@ B58_340I = EngineSpec(
     stroke_mm=94.6,
     firing_order=(1, 5, 3, 6, 2, 4),  # BMW's inline-6 firing order
     idle_rpm=700.0,
-    redline_rpm=7000.0,
+    redline_rpm=6000.0,
     ve_peak=0.94,
     ve_floor_fraction=0.55,
     miller_cycle=False,
@@ -33,4 +33,7 @@ B58_340I = EngineSpec(
     combustion_efficiency=0.98,
     realism_factor=0.471,
     crank_inertia_kgm2=0.24,
+    # BMW calls for premium (91 AKI / 95 RON) -- approximate, not a literal
+    # published knock-onset figure.
+    knock_octane_requirement=91.0,
 )

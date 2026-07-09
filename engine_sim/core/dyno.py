@@ -1,8 +1,9 @@
 """Engine dyno: load model + the tick loop tying Engine/Turbo/ECU together.
 
 This is a crank/engine dyno -- it loads the engine directly (no transmission,
-no wheels, no tire-road friction; that only exists in the drag-strip mode
-built later). Three load modes:
+no wheels, no tire-road friction; deliberately not modeled here, and no
+drag-strip/transmission phase is currently planned -- see the README). Three
+load modes:
 
   * "ramp_rpm": the brake controls torque so RPM climbs at a fixed rate
     (rpm/s) -- this is how a real dyno "power pull" is actually run (a large
@@ -28,7 +29,7 @@ from typing import Literal, Optional
 from engine_sim.core.ecu import ECU
 from engine_sim.core.engine import EngineReading
 from engine_sim.core.turbo import TurboReading
-from engine_sim.units import rpm_to_rad_s, rad_s_to_rpm, power_watts
+from engine_sim.units import rpm_to_rad_s, rad_s_to_rpm, power_watts, T_INTAKE_DEFAULT
 
 DynoMode = Literal["ramp_rpm", "free_accel", "hold_rpm"]
 
@@ -74,9 +75,21 @@ class DynoBrake:
         self._integral = 0.0
         self._prev_error = 0.0
 
-    def reset_pid(self) -> None:
+    def reset_pid(self, prev_error: float = 0.0) -> None:
+        """Zeros the integral term and seeds the derivative baseline.
+
+        `prev_error` should be the *actual* current rpm-vs-target error when
+        the caller already knows it's nonzero (e.g. DynoSession handing off
+        from a coast-down to this PID with real rpm still above target) --
+        defaulting it to 0.0 there would make the very next tick's
+        derivative term see a large fake jump from 0 to the real error,
+        producing a one-tick torque spike (a classic PID "derivative kick")
+        on top of whatever proportional correction was already warranted.
+        Callers that reset right as rpm is set exactly to the target (a
+        fresh idle) still want the default -- error is genuinely 0 there.
+        """
         self._integral = 0.0
-        self._prev_error = 0.0
+        self._prev_error = prev_error
 
     def load_torque(
         self,
@@ -131,11 +144,11 @@ class SimulationLoop:
         mode: DynoMode = "free_accel",
         target_rpm: Optional[float] = None,
         ramp_rate_rpm_s: Optional[float] = None,
-        intake_temp_k: float = 313.0,
+        ambient_temp_k: float = T_INTAKE_DEFAULT,
     ) -> DynoReading:
         throttle = max(0.0, min(1.0, throttle))
 
-        ecu_reading = self.ecu.tick(dt, self.rpm, throttle, intake_temp_k)
+        ecu_reading = self.ecu.tick(dt, self.rpm, throttle, ambient_temp_k)
 
         brake_torque = self.brake.load_torque(
             mode,

@@ -32,6 +32,7 @@ class EngineReading:
     fuel_mass_flow_kg_s: float
     afr_actual: float
     effective_compression_ratio: float
+    intake_temp_k: float
     indicated_torque_nm: float
     friction_torque_nm: float
     net_torque_nm: float
@@ -55,6 +56,7 @@ class Engine(ABC):
         target_afr: float,
         load_fraction: float,
         intake_temp_k: float,
+        octane: float,
     ) -> EngineReading:
         """Compute torque and diagnostics for the current tick. Does not
         integrate rotational dynamics -- that's the simulation loop's job."""
@@ -107,6 +109,19 @@ class ParametricEngine(Engine):
         eta_otto_ideal = 1.0 - compression_ratio ** (-(gamma - 1.0))
         return eta_otto_ideal * self.spec.realism_factor
 
+    def _knock_efficiency_penalty(self, load_fraction: float, octane: float) -> float:
+        """Approximated, not a literal knock-sensor/spark-table model: real
+        ECUs retard timing (costing thermal efficiency) when running below
+        the octane a tune assumes, and only under real cylinder pressure --
+        idling on low-octane fuel doesn't knock. Bounded so it degrades
+        power rather than pretending to model actual damaging knock."""
+        deficit = self.spec.knock_octane_requirement - octane
+        if deficit <= 0.0:
+            return 0.0
+        max_knock_loss = 0.15  # up to ~15% thermal efficiency lost at worst case
+        severity = min(deficit / 10.0, 1.0)  # 10 octane points under -> full penalty
+        return severity * max(0.0, min(1.0, load_fraction)) * max_knock_loss
+
     def _friction_torque(self, rpm: float) -> float:
         spec = self.spec
         fmep_pa = (
@@ -124,6 +139,7 @@ class ParametricEngine(Engine):
         target_afr: float,
         load_fraction: float,
         intake_temp_k: float,
+        octane: float,
     ) -> EngineReading:
         spec = self.spec
         rpm = max(rpm, 1.0)
@@ -140,6 +156,7 @@ class ParametricEngine(Engine):
 
         eff_cr = self.effective_compression_ratio(load_fraction)
         eta_thermal = self._thermal_efficiency(eff_cr)
+        eta_thermal *= 1.0 - self._knock_efficiency_penalty(load_fraction, octane)
 
         fuel_power_w = fuel_mass_flow * LHV_GASOLINE * spec.combustion_efficiency
         indicated_power_w = fuel_power_w * eta_thermal
@@ -147,7 +164,15 @@ class ParametricEngine(Engine):
         indicated_torque = indicated_power_w / omega if omega > 0 else 0.0
 
         friction_torque = self._friction_torque(rpm)
-        net_torque = max(0.0, indicated_torque - friction_torque)
+        # Deliberately NOT floored at 0: a real engine brakes itself when
+        # friction exceeds indicated torque (near-zero fueling off-throttle,
+        # or during a rev-limiter fuel cut) -- that negative net torque is
+        # exactly what makes a lifted throttle decelerate like a real engine
+        # on a dyno instead of just coasting on the dyno's own light drag.
+        # Never actually negative during any real WOT operation (indicated
+        # torque there is always far larger than this FMEP-scale friction
+        # term), so every validated power-pull curve is unaffected.
+        net_torque = indicated_torque - friction_torque
 
         return EngineReading(
             rpm=rpm,
@@ -157,6 +182,7 @@ class ParametricEngine(Engine):
             fuel_mass_flow_kg_s=fuel_mass_flow,
             afr_actual=afr_actual,
             effective_compression_ratio=eff_cr,
+            intake_temp_k=intake_temp_k,
             indicated_torque_nm=indicated_torque,
             friction_torque_nm=friction_torque,
             net_torque_nm=net_torque,

@@ -78,8 +78,11 @@ rather than reaching into `engine_sim.core` directly.
 .venv/bin/python -m pytest -q
 ```
 
-42 tests pass, including validation against three independently-published
-figures:
+88 tests pass (add `--cov=engine_sim --cov=dyno_cli --cov-report=term-missing`
+for a coverage breakdown -- currently 99%, and the remaining lines are the
+abstract `Engine.compute` stub, one unused convenience property, and the
+`if __name__ == "__main__"` guard), including validation against three
+independently-published figures:
 
 - **EA888 Gen3 (MK7 GTI, IS20)** -- VW/Audi's own published 147kW/200PS,
   320Nm torque plateau 1500-4400rpm, IS20 full boost by ~3200rpm. Simulated:
@@ -138,6 +141,7 @@ dyno> throttle 100
 dyno> step 3            # advance 3s at current throttle, free-play mode
 dyno> afr 11.5           # override target AFR (or "afr auto" to release it)
 dyno> boost 50           # cap wastegate authority at 50% of max boost (or "boost auto")
+dyno> octane 85          # set pump octane -- knock/timing-retard model (or "octane auto")
 dyno> sweep              # paced WOT power pull, prints the torque/power curve
 dyno> quit
 ```
@@ -174,13 +178,6 @@ Set it up once per machine:
 
 - Editing the wrong preset is an easy mistake to make: see "Which presets are
   actually live" above -- `TURBO_IS38`/`EA888_GEN3B_IS38` are decorative only.
-- There is no throttle control in the UI -- free-play throttle was removed
-  because, with the dyno's minimal parasitic load, almost any throttle input
-  just rockets RPM to the rev limiter and holds it there, making a slider feel
-  broken across most of its range. The **Start Power Pull** button (a paced
-  ECU-governed sweep) is the interactive path instead. Real throttle-driven
-  free-play would need an actual load model (road-load curve or a PID-held
-  RPM) before it's worth re-adding.
 - py4godot itself is still labelled "early phase, more a demo than for bigger
   projects" by its own maintainer -- if something behaves oddly, that binding
   is the more likely suspect than `engine_sim`, which is fully pytest-covered.
@@ -206,9 +203,21 @@ Set it up once per machine:
   directly against the sim, not just wired up and assumed.
 - **Override target AFR** -- checkbox + slider to force a fixed AFR instead
   of the ECU's own load-based control law (stoich cruise -> ~12.5 at WOT).
-- **Start Power Pull** -- runs a paced WOT sweep (default 400rpm/s, adjustable)
-  from idle to the rev limiter, plotting the torque/power curve live. Between
-  pulls the engine holds idle (800rpm, see below), not WOT.
+- **Throttle slider (vertical, 0-100%)** -- live, while running, and it
+  actually controls the sweep: during an active pull the brake resists the
+  engine hard to hold a controlled pace (up to 400rpm/s at full throttle,
+  scaling down with it -- exactly what a real engine dyno's brake does,
+  loading the engine rather than letting it free-rev against nothing).
+  Back off mid-pull and it stops being paced at all -- the engine decelerates
+  under its own engine braking + dyno inertia, exactly like lifting for real
+  (see "Off-throttle" below). **Start Power Pull** resets to idle/cold boost
+  and starts recording the run (clears the graph, arms the rev-limiter-
+  triggered finish) -- you then drive the throttle yourself for the actual
+  sweep. At 0% throttle the dyno brake holds `idle_rpm_target`, pull active
+  or not.
+- **Intake Air Temp (C) readout** -- the charge temperature the engine is
+  actually breathing this tick: ambient plus whatever heat soak the turbo
+  has built up (see below). Naturally-aspirated (LS2) always reads ambient.
 
 ### Sound
 
@@ -233,6 +242,98 @@ separate envelope that can jump):
 `EngineSpec.firing_order` is the same data both audio and the physics model
 consume -- audio is a consumer of engine facts, not a separate system that
 guesses from cylinder count alone.
+
+### Realism pass: charge heat, boost/AFR tables, rev-limiter bounce, knock
+
+Five additions on top of the original validated model, all bounded so the
+three validated curves stay within their existing tolerances:
+
+- **Charge-air heat soak** (`Turbo.tick()`) -- intake air temp chases
+  `ambient + charge_temp_rise_k_per_bar * current_boost_bar` on its own
+  (slow, ~10s) thermal lag, separate from the boost-pressure lag itself. A
+  sustained WOT hold genuinely gets hotter the longer it's held -- verified
+  in the CLI: ~20s at WOT on the B58 climbed intake air temp from ~40C to
+  ~63C. Back-to-back pulls run hotter than a single cold pull because
+  `Turbo.reset()` deliberately does *not* reset this state (only the boost
+  gauge) -- an intercooler doesn't forget either.
+- **RPM/load-based wastegate duty** (`ECU.wastegate_duty()`) -- the ECU no
+  longer targets full boost authority unconditionally; it ramps in with
+  load (previous tick's `load_fraction`, since this tick's isn't known yet)
+  and with RPM (held back near idle even at WOT, for driveability/knock
+  margin). Reaches 1.0 well before every validated spool checkpoint, so
+  every existing WOT pull is bit-for-bit unaffected -- this only matters at
+  partial throttle, which the throttle slider now makes reachable.
+- **RPM/load-based AFR** (`ECU.target_afr()`) -- replaced the old
+  throttle-position-only linear ramp with one indexed on `load_fraction`
+  (MAP-based), matching how real speed-density ECUs actually index their
+  base fuel table. Identical at WOT (both reach ~12.5 AFR), different at
+  partial throttle.
+- **Rev-limiter bounce** (`ECU.rev_limiter_active()`) -- fuel cut now has
+  hysteresis (resumes only `_rev_limiter_bounce_band_rpm` below the cut
+  point, not the instant rpm dips under it), so holding WOT into the
+  limiter genuinely bounces rpm back and forth instead of flatlining dead
+  level or chattering at one boundary -- audible live through
+  `dyno_audio.gd` since it just reads `controller.rpm` every frame.
+- **Knock/octane model** (`Engine._knock_efficiency_penalty()`, live-
+  overridable via `octane`/`set_octane_override()`) -- running below an
+  engine's `knock_octane_requirement` (approximate, not a literal published
+  figure) costs thermal efficiency, but only under real load -- idling on
+  bad fuel costs nothing, WOT on 10 points under costs up to ~15% torque.
+  LS2 (89 octane, NA) is deliberately less sensitive than the two turbo
+  presets (91 octane each) -- a real point of contrast between them.
+
+**Turbo spool is also now firing-order-derived, not just hand-tuned**
+(`Turbo._compute_pulse_quality()`): crank-degrees between exhaust pulses
+sharing one turbine path (`720 / (cylinders / exhaust_scroll_groups)`)
+narrows or widens the existing tuned `spool_width_rpm`/`spool_time_constant_s`
+around a single-scroll-I4 reference (`pulse_quality == 1.0`, so EA888/IS20 is
+completely unchanged). The B58's twin-scroll housing splits its actual
+firing order (1-5-3 / 6-2-4) into two paths spaced 240 degrees apart instead
+of one path at 120 degrees -- `pulse_quality ≈ 1.33`, genuinely derived from
+`EngineSpec.firing_order_resolved` (the same ground truth `dyno_audio.gd`
+consumes) rather than being a second, disconnected hand-picked constant.
+
+### Off-throttle: coasts down under real engine braking, not just drag
+
+Lifting mid-pull used to just gently decay on the dyno's ~3Nm parasitic drag
+alone -- barely perceptible over tens of seconds, nothing like how a real
+engine actually decelerates on a dyno. Two things were compounding to hide
+real engine braking:
+
+- **`ParametricEngine.compute()` floored net torque at 0.** A real engine
+  brakes itself whenever friction exceeds indicated torque (near-zero
+  fueling off-throttle) -- flooring it threw that away. Removed; harmless to
+  every validated WOT curve (indicated torque there is always far larger
+  than FMEP-scale friction, so the floor never actually bit during normal
+  operation -- it only mattered at zero fueling).
+- **The idle-air-equivalent fueling had no rpm ceiling.** It was tuned to
+  produce modest, non-stalling torque *at idle rpm* -- applied unchanged at,
+  say, 6000rpm off-throttle, the same small manifold pressure still flows
+  (and burns) far more air at the higher pumping rate, making enough torque
+  to stay net-positive and never decelerate at all. Real ECUs solve this
+  with **DFCO** (deceleration fuel cut-off): closed throttle is only treated
+  as idle-air up to `ECU.dfco_reengage_rpm` (`idle_rpm * 1.2`) -- above it,
+  fuel cuts entirely, same as the rev limiter, and real engine braking (now
+  that it isn't floored) does the decelerating.
+
+`DynoSession._drive()` hands off from free_accel (coasting under engine
+braking + dyno inertia) to the idle-hold PID at that *exact same*
+`dfco_reengage_rpm`, deliberately -- if the PID engaged earlier, its
+correction would stack on top of the engine's own still-active braking
+torque and produce an unrealistically hard combined brake. One shared
+threshold, not two hand-tuned constants that could drift apart.
+
+**A second, subtler bug turned up writing the regression test for this:**
+`DynoBrake.reset_pid()` always zeroed `_prev_error` to 0.0, regardless of
+the *actual* rpm-vs-target error at the moment of reset. Handing off to the
+PID from, say, 960rpm against an 800rpm idle target (a real 160rpm error)
+made the very next tick's derivative term see a fake jump from 0 to 160 --
+a textbook PID "derivative kick" -- spiking brake torque well past even the
+already-firm proportional correction, still crashing rpm on handoff.
+`reset_pid()` now takes an optional `prev_error` so `DynoSession` can seed
+it with the real error, keeping the derivative term at ~0 on the first tick
+instead of a phantom spike (`tests/test_components.py::test_dyno_brake_reset_pid_seeds_derivative_baseline_to_avoid_kick`
+locks this in specifically).
 
 ### Idle: holds 800rpm, doesn't stall or run away (fixed, worth knowing why)
 
@@ -265,6 +366,53 @@ Two related bugs showed up back to back and are both fixed in
 Covered by `tests/test_components.py::test_zero_throttle_uses_bounded_idle_air_not_full_atmospheric_map`
 and `tests/test_session.py::test_session_starts_at_idle_and_holds_it` /
 `::test_idle_recovers_after_a_power_pull`.
+
+### A pull now actually resists the engine, instead of free-revving
+
+An active power pull used to run `free_accel` (~3Nm of dyno drag, essentially
+unloaded) -- realistic for casual free-play, but a real engine dyno's whole
+job is to *load* the engine, not let it rev against nothing. During an
+active pull the brake now runs `ramp_rpm` instead: it actively resists to
+hold a controlled sweep pace (up to 400rpm/s at full throttle, scaling down
+with it, matching `SimulationLoop.run_power_pull()`'s own default and real
+dyno sweep rates) -- at WOT this soaks up hundreds of Nm of resistance, not
+3. Outside of an active/recorded pull (casual free-play, e.g. the CLI's
+`throttle`/`step`), it's still plain `free_accel` -- only a recorded pull
+gets the resisted, paced sweep.
+
+### Audited: dead code, comment accuracy, and mutation-tested assertions
+
+A full pass over the project rather than just trusting green tests:
+
+- **Dead code**: an AST-based scan of every function/method across
+  `engine_sim`, `dyno_cli.py`, and the Godot scripts found nothing unused.
+  An unused `import pytest` in `tests/test_cli.py` was the one real find,
+  removed.
+- **Comment accuracy**: several stale references were found and fixed --
+  `Turbo.reset()` pointed at `EngineSpec.charge_temp_rise_k_per_bar`
+  (actually a `TurboSpec` field), `specs.py` referenced a nonexistent
+  `Turbo._pulse_quality()` method (it's `_compute_pulse_quality()`), and
+  three module docstrings (`core/dyno.py`, `session.py`,
+  `dyno_controller.py`) still described a planned "drag-strip view" future
+  consumer -- stale now that there's no such roadmap (see "Not built, and
+  not currently planned" below). `dyno_controller.py`'s own class docstring
+  had also drifted: it listed only the original inputs and never mentioned
+  `octane_override`/`throttle_percent` once those were added.
+- **Mutation testing** (deliberately breaking one piece of logic at a time,
+  confirming the suite goes red, then reverting) against rev-limiter
+  hysteresis, the AFR control law, the knock-penalty guard, the VE floor,
+  `pulse_quality`'s clamp bounds, wastegate duty's rpm term, the FMEP
+  friction sign, the engine-braking floor, and the pull-resistance fix above
+  -- all caught cleanly by a single, correctly-targeted test each. One
+  mutation (disabling DFCO by inflating `_dfco_reengage_factor`) initially
+  passed clean -- a real false negative: the existing DFCO test read
+  `ecu.dfco_reengage_rpm` as its own reference point rather than asserting
+  what that number should actually be, and the coast-down regression test
+  only ever compared *among* post-lift samples, never against the rpm right
+  before lifting -- exactly where that mutation's crash-to-zero landed.
+  Both gaps are fixed: `test_dfco_reengage_rpm_is_pinned_to_a_real_value_not_just_self_consistent`
+  now pins the actual number, and the coast-down test seeds its sample list
+  with the pre-lift rpm.
 
 ## Not built, and not currently planned
 

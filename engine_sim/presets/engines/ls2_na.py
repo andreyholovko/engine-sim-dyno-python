@@ -34,4 +34,9 @@ LS2_NA = EngineSpec(
     combustion_efficiency=0.98,
     realism_factor=0.654,
     crank_inertia_kgm2=0.30,
+    # GM's Corvette manual calls for 89 (mid-grade) minimum, premium
+    # recommended for peak output -- meaningfully less knock-sensitive than
+    # the two turbo/direct-injection presets, and a real point of contrast:
+    # this one only picks up a knock penalty on genuinely low-grade fuel.
+    knock_octane_requirement=89.0,
 )

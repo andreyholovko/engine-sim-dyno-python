@@ -15,6 +15,8 @@ Commands:
                        printing a snapshot every ~0.5s
     afr <value|auto>   override target AFR, or "auto" for the ECU's own
                        load-based control law
+    octane <value|auto>  set pump octane (knock/timing-retard model), or
+                       "auto" to restore the engine's own knock_octane_requirement
     sweep              run a paced WOT power pull (idle -> rev limiter),
                        print the torque/power curve
     status             print the current reading
@@ -31,7 +33,8 @@ def status_line(s: DynoSnapshot) -> str:
         f"afr={s.afr_actual:5.2f}  ve={s.volumetric_efficiency:4.2f}  "
         f"air={s.air_mass_flow_g_s:5.2f}g/s  "
         f"fuel={s.fuel_mass_flow_g_s:5.2f}g/s  "
-        f"cr={s.effective_compression_ratio:4.2f}"
+        f"cr={s.effective_compression_ratio:4.2f}  "
+        f"iat={s.intake_air_temp_k - 273.15:4.1f}C"
         + ("  [REV LIMIT]" if s.rev_limiter_active else "")
     )
 
@@ -101,6 +104,14 @@ def main() -> None:
             else:
                 session.set_afr_override(float(parts[1]))
                 print(f"AFR override: {float(parts[1]):.2f}")
+
+        elif cmd == "octane" and len(parts) == 2:
+            if parts[1].lower() == "auto":
+                session.set_octane_override(None)
+                print("octane: auto (engine's own knock_octane_requirement)")
+            else:
+                session.set_octane_override(float(parts[1]))
+                print(f"octane set to {float(parts[1]):.0f}")
 
         elif cmd == "step" and len(parts) == 2:
             duration = float(parts[1])

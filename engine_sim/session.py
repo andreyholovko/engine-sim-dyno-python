@@ -1,17 +1,17 @@
 """DynoSession: the one interface every frontend talks to.
 
-The CLI, the Godot UI, and any future consumer (a 3D drag-strip view, say)
-render and drive things differently -- but they should never each construct
-their own Engine/Turbo/ECU/SimulationLoop by hand, and never each hand-roll
-their own flattening of a DynoReading into display fields. Do that once,
-here, so every consumer is provably looking at the same simulation instead of
-three copies that happen to agree today and can silently drift tomorrow.
+The CLI and the Godot UI render and drive things differently -- but they
+should never each construct their own Engine/Turbo/ECU/SimulationLoop by
+hand, and never each hand-roll their own flattening of a DynoReading into
+display fields. Do that once, here, so every consumer is provably looking at
+the same simulation instead of three copies that happen to agree today and
+can silently drift tomorrow.
 
 `DynoSession()` with no arguments is *the* canonical dyno: EA888 Gen3 (IS20),
 the preset validated against VW's own published figures. Pass a different
-engine_spec/turbo_spec only for a deliberately different configuration (e.g.
-a future engine-swap/garage screen) -- everyone who just wants "the dyno"
-should call `DynoSession()` and get identical behavior.
+engine_spec/turbo_spec only for a deliberately different configuration --
+everyone who just wants "the dyno" should call `DynoSession()` and get
+identical behavior.
 """
 
 from dataclasses import dataclass
@@ -42,6 +42,7 @@ class DynoSnapshot:
     air_mass_flow_g_s: float
     fuel_mass_flow_g_s: float
     effective_compression_ratio: float
+    intake_air_temp_k: float
     rev_limiter_active: bool
     power_pull_active: bool
 
@@ -55,11 +56,15 @@ class DynoSession:
         engine_key: str = "ea888_gen3_is20",
     ):
         engine = ParametricEngine(engine_spec)
-        turbo = Turbo(turbo_spec)
+        turbo = Turbo(turbo_spec, firing_order_length=len(engine_spec.firing_order_resolved))
         ecu = ECU(engine, turbo)
         self.loop = SimulationLoop(ecu, brake if brake is not None else DynoBrake())
         self._power_pull_active = False
-        self._ramp_rate_rpm_s = 400.0
+        # True while off-throttle rpm is decelerating naturally toward idle
+        # (see _drive()) rather than being actively PID-held there yet --
+        # tracked so the PID's integral only resets once, at the moment it
+        # actually takes over, not stale from whatever it was doing before.
+        self._coasting = False
         self.idle_rpm_target = engine_spec.idle_rpm
         self.engine_key = engine_key
 
@@ -85,11 +90,12 @@ class DynoSession:
             raise ValueError(f"unknown engine choice: {key!r}. Available: {sorted(ENGINE_CHOICES)}")
         engine_spec, turbo_spec, _ = ENGINE_CHOICES[key]
         engine = ParametricEngine(engine_spec)
-        turbo = Turbo(turbo_spec)
+        turbo = Turbo(turbo_spec, firing_order_length=len(engine_spec.firing_order_resolved))
         ecu = ECU(engine, turbo)
         self.loop = SimulationLoop(ecu, self.loop.brake)
         self.loop.brake.reset_pid()
         self._power_pull_active = False
+        self._coasting = False
         self.idle_rpm_target = engine_spec.idle_rpm
         self.engine_key = key
 
@@ -117,38 +123,97 @@ class DynoSession:
         fraction = None if percent is None else max(0.0, min(1.0, percent / 100.0))
         self.loop.ecu.set_boost_target_fraction(fraction)
 
-    def start_power_pull(self, ramp_rate_rpm_s: float = 400.0) -> None:
+    def set_octane_override(self, octane: Optional[float]) -> None:
+        """Pump octane the engine is actually running on. None restores the
+        engine's own knock_octane_requirement (no knock penalty)."""
+        self.loop.ecu.set_fuel_octane(octane)
+
+    def start_power_pull(self) -> None:
+        """Reset to idle/cold-boost and start recording a run -- the actual
+        sweep is driven live by whatever throttle_percent the caller passes
+        to tick() each frame from here on (a vertical throttle slider, a
+        held key, etc.), the way a real inertia-dyno pull is driven by the
+        operator's own right foot rather than an artificially paced sweep."""
         self.loop.rpm = self.loop.ecu.engine.spec.idle_rpm
         self.loop.time_s = 0.0
         self.loop.brake.reset_pid()
         self.loop.ecu.turbo.reset()
-        self._ramp_rate_rpm_s = ramp_rate_rpm_s
         self._power_pull_active = True
+        self._coasting = False
 
     def stop_power_pull(self) -> None:
         self._power_pull_active = False
 
-    def tick(self, dt: float, throttle_percent: float = 0.0) -> DynoSnapshot:
-        """Advance one tick. While a power pull is active, WOT + the ramp
-        mode governs regardless of throttle_percent -- a real dyno operator
-        doesn't get to back off mid-pull. At zero throttle, the dyno brake
-        holds `idle_rpm_target` (the way idle is also held against real
-        accessory load, not just the ECU's own idle air) instead of free-
-        revving or stalling. Above zero throttle, free-play (light parasitic
-        load only, RPM responds like a free-revving engine on a stand)."""
-        if self._power_pull_active:
-            reading = self.loop.tick(
-                dt, throttle=1.0, mode="ramp_rpm", ramp_rate_rpm_s=self._ramp_rate_rpm_s
-            )
-            if self.loop.rpm >= self.loop.ecu.rev_limiter_threshold_rpm:
-                self._power_pull_active = False
-            return self._snapshot(reading, throttle_percent=100.0, power_pull_active=self._power_pull_active)
+    # A real engine dyno loads the engine hard during a pull -- that's the
+    # whole point of the machine -- rather than letting it free-rev against
+    # nothing but bearing drag. This is the pace the brake actively resists
+    # to hold at full throttle (matches SimulationLoop.run_power_pull()'s
+    # own default, and real dyno sweep rates -- see core/dyno.py); at
+    # partial throttle mid-pull the target pace scales down with it, so the
+    # operator's own throttle position still controls the sweep.
+    _PULL_MAX_RAMP_RATE_RPM_S = 400.0
 
-        if throttle_percent <= 1e-6:
-            reading = self.loop.tick(dt, throttle=0.0, mode="hold_rpm", target_rpm=self.idle_rpm_target)
-        else:
-            reading = self.loop.tick(dt, throttle=throttle_percent / 100.0, mode="free_accel")
-        return self._snapshot(reading, throttle_percent=throttle_percent, power_pull_active=False)
+    def _drive(self, dt: float, throttle_percent: float) -> DynoReading:
+        """Advance one tick for a given live throttle position (0-100).
+
+        Above zero throttle during an active pull: `ramp_rpm` mode -- the
+        brake actively resists the engine to hold a controlled sweep pace
+        (scaled by throttle position), the way a real engine dyno's brake
+        genuinely loads the engine rather than letting it free-rev against
+        nothing. Above zero throttle otherwise (casual free-play, not
+        recording a run): free_accel, RPM responds to the engine's own net
+        torque against just the dyno's light parasitic drag and inertia.
+
+        At zero throttle, well above idle: still free_accel, so the engine
+        decelerates under its own engine braking (friction now genuinely
+        exceeds the near-zero off-throttle indicated torque -- see
+        ParametricEngine.compute()) plus the dyno's rotating inertia and
+        parasitic drag, the way a real car actually decelerates on a dyno
+        when you lift -- not an artificial snap back to a target.
+
+        At zero throttle, near idle: hands off to the dyno brake's hold_rpm
+        PID, which pins it at idle_rpm_target the way a real idle is also
+        held against accessory load (see DynoBrake) -- resetting the PID's
+        integral exactly once, at the moment it takes over, not every tick
+        it's active. This handoff uses the ECU's own dfco_reengage_rpm, the
+        same number that decides whether the ECU itself is still fuel-
+        cutting -- if the PID engaged first, its correction would stack on
+        top of real engine-braking torque instead of trimming a small
+        residual once the engine's back to idle-equivalent fueling.
+        """
+        if throttle_percent > 1e-6:
+            self._coasting = False
+            throttle = min(throttle_percent, 100.0) / 100.0
+            if self._power_pull_active:
+                ramp_rate = self._PULL_MAX_RAMP_RATE_RPM_S * throttle
+                return self.loop.tick(dt, throttle=throttle, mode="ramp_rpm", ramp_rate_rpm_s=ramp_rate)
+            return self.loop.tick(dt, throttle=throttle, mode="free_accel")
+
+        idle_target = self.idle_rpm_target
+        if self.loop.rpm > self.loop.ecu.dfco_reengage_rpm:
+            self._coasting = True
+            return self.loop.tick(dt, throttle=0.0, mode="free_accel")
+
+        if self._coasting:
+            # Seed the derivative baseline with the *real* current error
+            # (rpm is still meaningfully above idle_target here) -- leaving
+            # it at the reset() default of 0.0 would make this tick's
+            # derivative term see a fake jump from 0 to the real error,
+            # spiking brake torque well beyond even the (already firm)
+            # proportional correction.
+            self.loop.brake.reset_pid(prev_error=self.loop.rpm - idle_target)
+        self._coasting = False
+        return self.loop.tick(dt, throttle=0.0, mode="hold_rpm", target_rpm=idle_target)
+
+    def tick(self, dt: float, throttle_percent: float = 0.0) -> DynoSnapshot:
+        """Advance one tick (see _drive() for the off-throttle coast-down
+        vs. idle-hold split). While a pull is "active" this is exactly the
+        same physics, just tracked/recorded and auto-ending at the rev
+        limiter."""
+        reading = self._drive(dt, throttle_percent)
+        if self._power_pull_active and self.loop.rpm >= self.loop.ecu.rev_limiter_threshold_rpm:
+            self._power_pull_active = False
+        return self._snapshot(reading, throttle_percent=throttle_percent, power_pull_active=self._power_pull_active)
 
     def run_power_pull(self, ramp_rate_rpm_s: float = 400.0, dt: float = 0.01) -> list[DynoSnapshot]:
         """Batch convenience for consumers that don't need live per-frame
@@ -173,6 +238,7 @@ class DynoSession:
             air_mass_flow_g_s=reading.engine.air_mass_flow_kg_s * 1000.0,
             fuel_mass_flow_g_s=reading.engine.fuel_mass_flow_kg_s * 1000.0,
             effective_compression_ratio=reading.engine.effective_compression_ratio,
+            intake_air_temp_k=reading.engine.intake_temp_k,
             rev_limiter_active=self.loop.ecu.rev_limiter_active(reading.rpm),
             power_pull_active=power_pull_active,
         )

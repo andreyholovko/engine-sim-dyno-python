@@ -13,6 +13,14 @@ extends AudioStreamPlayer
 ## no click to fix because there's nothing left that can discontinuously
 ## jump.
 ##
+## The raw per-cylinder pulse train is deliberately NOT the final output --
+## real exhaust note doesn't sound like individually-audible cylinder hits,
+## because it's been through a manifold and a muffler by the time it reaches
+## your ear, both of which are resonant acoustic chambers that let one
+## firing pulse ring into and blend with the next rather than decaying to
+## silence between hits. _exhaust_filter() models that stage explicitly and
+## separately from the engine's own combustion-tone filtering (_engine_lp).
+##
 ## Godot audio practices followed here:
 ## - AudioStreamGenerator + AudioStreamGeneratorPlayback, refilled from
 ##   _process() by checking get_frames_available() every frame -- the
@@ -44,6 +52,11 @@ var _engine_lp := 0.0  # one-pole lowpass state -- bigger engines get a lower cu
 # regenerated only when the engine actually changes, not per sample.
 var _cylinder_amps: Array[float] = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
 var _cached_engine_generation := -1
+
+# --- exhaust (muffler/manifold resonance, applied after the raw per-
+# cylinder pulses -- see _exhaust_filter) ---
+var _exhaust_low := 0.0
+var _exhaust_band := 0.0
 
 # --- turbo whine ---
 var _turbo_phase := 0.0
@@ -119,6 +132,37 @@ func _engine_sample(dt: float) -> float:
 	return _engine_lp * loudness * rpm_gate
 
 
+func _exhaust_filter(input: float, dt: float) -> float:
+	# Muffler/manifold as a resonant chamber, not just a duller copy of the
+	# cylinder pulse -- this is what actually turns "hear every cylinder
+	# click individually" into "one continuous note coming out of a pipe."
+	# A state-variable (Chamberlin) 2-pole lowpass: mild resonance lets
+	# consecutive firing pulses ring into and blend with each other instead
+	# of decaying to silence between hits, the way a real exhaust's
+	# resonant cavity behaves -- a plain one-pole filter (as used for
+	# _engine_lp, modeling the combustion tone itself, a separate stage)
+	# only softens each pulse's edges without blending it into the next.
+	# Two state floats, no allocation -- safe in this 44.1kHz hot path.
+	#
+	# Cutoff is calibrated against real firing frequencies (cylinders*rpm/120,
+	# ~25-450Hz across idle-to-redline for these engines), not just "lower
+	# than _engine_lp's" -- that's what actually matters for whether
+	# consecutive pulses blend. Below cutoff (idle/low rpm) pulses stay
+	# fairly distinct (a real idle IS somewhat "lopey", not a pure hum);
+	# once firing rate climbs past cutoff (cruise/high rpm) they blend into
+	# a continuous roar, same as a real exhaust. Bigger engines get a lower
+	# cutoff -- bigger, more muffled systems, and a lower idle firing rate
+	# to begin with.
+	var displacement_l: float = controller.displacement_l
+	var cutoff_hz: float = lerp(220.0, 90.0, clamp((displacement_l - 1.4) / 2.2, 0.0, 1.0))
+	var f: float = 2.0 * sin(PI * cutoff_hz * dt)
+	var damping := 1.1  # > 1 = safely damped -- richer tone, never self-oscillates/whistles
+	_exhaust_low += f * _exhaust_band
+	var high: float = input - _exhaust_low - damping * _exhaust_band
+	_exhaust_band += f * high
+	return _exhaust_low
+
+
 func _turbo_sample(dt: float) -> float:
 	var boost_bar: float = controller.boost_bar
 	var max_boost_bar: float = max(controller.max_boost_bar, 0.01)
@@ -133,5 +177,8 @@ func _turbo_sample(dt: float) -> float:
 
 func _next_sample() -> Vector2:
 	var dt := 1.0 / SAMPLE_RATE
-	var mixed: float = clamp(_engine_sample(dt) * 0.8 + _turbo_sample(dt), -1.0, 1.0)
+	# Turbo whine is intake/compressor-side, not exhaust -- only the engine's
+	# own combustion pulses go through the exhaust stage before mixing.
+	var exhaust_note: float = _exhaust_filter(_engine_sample(dt), dt)
+	var mixed: float = clamp(exhaust_note * 0.8 + _turbo_sample(dt), -1.0, 1.0)
 	return Vector2(mixed, mixed)
