@@ -114,16 +114,46 @@ idle.
 
 **Selecting an engine:** `ENGINE_CHOICES` in `engine_sim/presets/__init__.py`
 is the registry both `DynoSession.select_engine(key)` and every UI read from
--- currently `"ea888_gen3_is20"` (the default), `"b58_340i"`, and `"ls2_na"`.
-In the CLI: `engine ls2_na` (or `engines` to list choices). In Godot: the
-**Engine** dropdown at the top of the UI. `EA888_GEN3B_IS38` / `TURBO_IS38`
-also exist in `presets/` for variety but are deliberately left out of
-`ENGINE_CHOICES` -- they're explicitly *not* validated against a published
-dyno sheet (see that file's docstring), so they're not offered as an
-equally-trustworthy selectable option. Editing `TURBO_IS38`'s `max_boost_bar` (easy to do by
-mistake, presets live in neighboring files) has no effect on anything you can
-see for the same reason -- if you want to change a turbo's max boost, make
-sure you're editing the `TurboSpec` actually referenced by `ENGINE_CHOICES`.
+-- currently `"ea888_gen3_is20"` (the default), `"b58_340i"`, and `"ls2_na"`,
+each always paired with its own *stock* turbo. In the CLI: `engine ls2_na`
+(or `engines` to list choices). In Godot: the **Engine** dropdown at the top
+of the UI. `EA888_GEN3B_IS38` exists in `presets/` for variety (the
+Miller-cycle example) but is deliberately left out of `ENGINE_CHOICES` --
+it's explicitly *not* validated against a published dyno sheet (see that
+file's docstring), so it's not offered as an equally-trustworthy option.
+
+**Selecting a turbo (independent of engine):** `TURBO_CHOICES_BY_ENGINE` is a
+second, separate registry -- real (or clearly-labeled representative) turbo
+upgrade paths for each `ENGINE_CHOICES` engine, swappable via
+`DynoSession.select_turbo(key)`/`select_turbo_by_index()` *without* changing
+the engine. The point is watching one validated engine spec produce a
+genuinely different torque/power curve and spool timing under a different
+turbo, the same way a real turbo swap does:
+
+- **EA888**: stock IS20 -> **IS38** (the real "IS38 hybrid swap", one of the
+  most common EA888 upgrades -- `TURBO_IS38` used to be a decorative preset
+  with an unrealistic 3.35 bar placeholder; it's now a real selectable
+  option at a realistic ~1.8 bar) -> aftermarket big-frame hybrid
+  (TTE-class, representative of that category, ~2.1 bar, spools noticeably
+  later).
+- **B58**: stock 340i unit -> **B58TU** (the real, bigger factory turbo
+  BMW actually fits to the M340i/Supra, ~1.45 bar vs the 340i's 1.2) ->
+  aftermarket big single (Pure Stage 2-class, representative, ~2.0 bar --
+  and genuinely abandons the twin-scroll housing for a single big turbine,
+  a real documented trade at that size, so it also spools later/less
+  decisively than either twin-scroll option).
+- **LS2**: naturally aspirated (stock) -> a representative twin-turbo kit
+  (~0.7 bar/10psi, a conservative stock-internals-safe point -- there's no
+  one canonical "the LS2 turbo" the way there's an OEM path for the other
+  two, turbocharging an LS is a huge, kit-dependent aftermarket world).
+
+In the CLI: `turbos` to list the current engine's choices, `turbo <key>` to
+switch. In Godot: the **Turbo** dropdown next to Engine, repopulated
+whenever you change engines (a turbo choice from one engine isn't valid on
+another). `TURBO_CHOICES_BY_ENGINE`'s own docstring in `presets/__init__.py`
+is explicit about which numbers are real/documented versus representative
+of a category -- read it before treating any of these as verified spec
+sheets.
 
 ## Fastest way to actually drive it: `dyno_cli.py`
 
@@ -136,7 +166,9 @@ No Godot required. An interactive terminal dyno against the exact same
 
 ```
 dyno> engines            # list selectable engines
-dyno> engine b58_340i    # switch engine+turbo mid-session
+dyno> engine b58_340i    # switch engine (and its stock turbo) mid-session
+dyno> turbos             # list turbo choices for the CURRENT engine
+dyno> turbo b58tu        # swap turbos on the SAME engine -- different curve
 dyno> throttle 100
 dyno> step 3            # advance 3s at current throttle, free-play mode
 dyno> afr 11.5           # override target AFR (or "afr auto" to release it)
@@ -197,6 +229,13 @@ Set it up once per machine:
   type already confirmed working (`rpm`, `engine_count`, etc. all display
   correctly). The `str` properties are left in place as a nice-to-have/debug
   aid, but nothing load-bearing depends on them anymore.
+- **Turbo dropdown** -- selects from the current engine's
+  `TURBO_CHOICES_BY_ENGINE` list (`DynoSession.select_turbo_by_index()`),
+  keeping the same engine but rebuilding Turbo/ECU -- same `str`-across-
+  py4godot-boundary reasoning and index-addressed selection as the Engine
+  dropdown. Repopulated whenever the Engine dropdown changes (a different
+  engine has an entirely different turbo lineup); resets to that engine's
+  own stock unit automatically. Aborts any in-progress pull.
 - **Target Boost slider (0-100%)** -- caps the ECU's wastegate authority as a
   fraction of the turbo's `max_boost_bar` (`TURBO_IS20`, currently 1.3 bar).
   50% target measurably drops peak torque from ~324Nm to ~230Nm -- verified
@@ -223,9 +262,9 @@ Set it up once per machine:
 
 `dyno_audio.gd` (a `DynoAudio` node alongside `DynoController` in
 `Dyno.tscn`) procedurally synthesizes engine and turbo sound live from the
-controller's state -- no audio assets. Two oscillators, each a pure function
-of a single continuously-advancing phase (never hard-reset, never driven by a
-separate envelope that can jump):
+controller's state -- no audio assets. Two signal chains, each built from
+pure functions of a single continuously-advancing phase (never hard-reset,
+never driven by a separate envelope that can jump):
 
 - **Engine**: phase is counted in cylinders, not radians, so each firing
   event lands a cubed half-sine pulse timed to real `cylinders * rpm / 120`
@@ -233,11 +272,32 @@ separate envelope that can jump):
   length character) comes from `EngineSpec.firing_order_resolved`, is fixed
   per engine (deterministic RNG seeded from `engine_generation`, not redrawn
   every firing event), and always changes on a waveform zero-crossing, so
-  swapping engines mid-session can never click. A one-pole lowpass darkens
-  the tone with displacement (EA888 2.0L brightest, LS2 6.0L deepest) --
-  bigger engine sounds deeper, independent of firing rate.
-- **Turbo**: a whine that rises in pitch and gain with `boost_bar /
-  max_boost_bar` (spool fraction).
+  swapping engines mid-session can never click. A one-pole lowpass
+  (`_engine_lp`) darkens the combustion tone itself with displacement (EA888
+  2.0L brightest, LS2 6.0L deepest).
+  **Then it goes through an exhaust stage** (`_exhaust_filter()`) -- a real
+  gap found by ear: the raw per-cylinder pulses alone sounded like
+  individually-audible clicks rather than one continuous note, because a
+  single one-pole filter softens each pulse's edges without actually
+  blending consecutive ones together. A 2-pole resonant (state-variable)
+  lowpass, cutoff calibrated against real firing frequencies (not just
+  "lower than the engine filter's") -- below cutoff (idle/low rpm) pulses
+  stay a bit distinct (a real idle IS somewhat lopey, not a pure hum); once
+  firing rate climbs past cutoff (cruise/high rpm) they genuinely blend
+  into a continuous roar, the way a muffler's resonant cavity actually
+  behaves. Verified numerically: at cruise/high rpm the fraction of
+  near-silent samples between pulses drops from ~20% to ~3%.
+- **Turbo**: a whine whose pitch rises with spool fraction (`boost_bar /
+  max_boost_bar`) *and* whose whole pitch range and gain depend on which
+  turbo is actually fitted, not just how spooled it currently is -- a
+  bigger turbo (higher `max_boost_bar`, a stand-in for compressor/turbine
+  size) spins slower at full chat than a small one, so it gets a lower,
+  more "whoosh" pitch range; and loudness scales with the actual boost
+  *pressure* reached, not just relative spool fraction, so a big turbo
+  genuinely making 2 bar reads as a more prominent sound event than a small
+  one topping out at 0.7 bar even though both are "100% spooled." This is
+  what makes the different turbo choices below audibly differ, not just
+  produce different dyno numbers.
 
 `EngineSpec.firing_order` is the same data both audio and the physics model
 consume -- audio is a consumer of engine facts, not a separate system that
