@@ -41,6 +41,25 @@ const Layout = preload("res://scripts/drag_scene_layout.gd")
 const QUARTER_MILE_M := 402.336
 const SMOKE_SLIP_THRESHOLD := 0.18  # beyond the tire's peak-grip slip ratio -- see engine_sim.core.tire
 
+# Smoke particles live under Car (see @onready smoke_front/smoke_rear below)
+# so they inherit the car's own ~stationary screen position rather than a
+# spinning wheel's rotation (see this file's header on why the car itself
+# never translates -- the world scrolls under it instead). Left alone,
+# that means freshly-emitted smoke would just sit near the car instead of
+# getting left behind on the (fast-scrolling) road the way real tire smoke
+# does. SMOKE_DRIFT_ACCEL_PX_S2_PER_MPS drives CPUParticles2D.gravity's x
+# component every frame (see _process()) so live smoke accelerates
+# leftward at a rate scaled off the current road speed -- not dimensionally
+# "correct" (a real road-relative velocity would be a one-time launch
+# velocity, not a continuous acceleration), but CPUParticles2D has no
+# per-particle "inherit this base velocity" field to hook a launch velocity
+# into, and this reaches a visually convincing leftward drift well within
+# a particle's short lifetime, which a small fixed velocity wouldn't (the
+# road at even 40km/h scrolls at ~550px/s -- try to match that instantly
+# and every puff looks like a horizontal streak, not a cloud).
+const SMOKE_DRIFT_ACCEL_PX_S2_PER_MPS := 6.0
+const SMOKE_RISE_PX_S2 := -40.0  # matches the .tscn's original static gravity.y -- smoke drifting upward
+
 # Hardcoded, matching engine_sim/presets/__init__.py's CAR_CHOICES/
 # TURBO_CHOICES_BY_CAR order exactly -- same str-across-py4godot-boundary
 # reasoning as dyno_ui.gd's own copy of these same lists (see that file for
@@ -93,8 +112,8 @@ const TILT_SMOOTHING_PER_S := 6.0
 @onready var finish_line: Node2D = $FinishLine
 @onready var wheel_front: Node2D = $Car/WheelFront
 @onready var wheel_rear: Node2D = $Car/WheelRear
-@onready var smoke_front: CPUParticles2D = $Car/WheelFront/SmokeParticles
-@onready var smoke_rear: CPUParticles2D = $Car/WheelRear/SmokeParticles
+@onready var smoke_front: CPUParticles2D = $Car/SmokeParticlesFront
+@onready var smoke_rear: CPUParticles2D = $Car/SmokeParticlesRear
 
 @onready var countdown_label: Label = $UI/CountdownLabel
 @onready var throttle_slider: VSlider = $UI/ThrottleRow/ThrottleSlider
@@ -223,6 +242,13 @@ func _process(delta: float) -> void:
 	# can smoke at both since both axles are genuinely driven.
 	smoke_front.emitting = is_spinning and front_driven
 	smoke_rear.emitting = is_spinning and rear_driven
+	# Continuously re-applied (not just set at emission) so already-live
+	# smoke keeps accelerating to match the CURRENT road speed, same as the
+	# background layers' own scroll rate above -- see
+	# SMOKE_DRIFT_ACCEL_PX_S2_PER_MPS's docstring.
+	var smoke_drift: Vector2 = Vector2(-vehicle_speed_mps * SMOKE_DRIFT_ACCEL_PX_S2_PER_MPS, SMOKE_RISE_PX_S2)
+	smoke_front.gravity = smoke_drift
+	smoke_rear.gravity = smoke_drift
 	slip_value.text = "Slip: %+.3f%s" % [slip_ratio, " SPIN!" if is_spinning else ""]
 	slip_value.add_theme_color_override("font_color", SLIP_SPINNING_COLOR if is_spinning else SLIP_NORMAL_COLOR)
 
